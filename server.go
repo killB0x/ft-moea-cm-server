@@ -11,6 +11,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+var db *sql.DB
+
 type UploadData struct {
 	Run_id                    int64       `json:"run_id"`
 	Dataset                   string      `json:"dataset"`
@@ -18,6 +20,7 @@ type UploadData struct {
 	Attribute_data            [][]float64 `json:"attribute_data"`
 	Is_multithreading_enabled bool        `json:"is_multithreading_enabled"`
 	Metric_config             string      `json:"metric_config"`
+	Time                      float64     `json:"time"`
 }
 
 type Test struct {
@@ -48,7 +51,8 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Println("Received POST data:", recievedData)
+	fmt.Println("Dataset:", recievedData.Dataset)
+	uploadDataToDB(recievedData)
 
 	// You can add more logic here to react to the POST request.
 
@@ -56,12 +60,65 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Successfully received POST request"))
 }
 
+func uploadDataToDB(data UploadData) {
+	// Upload the data as transactions to prevent pollution in case of failure
+	tx, err := db.Begin()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = tx.Exec("INSERT IGNORE INTO run (idRun, isMultithreadingEnabled, metricConfig, usedDataset) VALUES (?, ?, ?, ?)", data.Run_id, data.Is_multithreading_enabled, data.Metric_config, data.Dataset)
+	if err != nil {
+		log.Fatal(err)
+		tx.Rollback() // Important
+	}
+
+	res, err := tx.Exec("INSERT INTO generation (idRun, time) VALUES (?, ?)", data.Run_id, data.Time)
+	if err != nil {
+		log.Fatal(err)
+		tx.Rollback() // Important
+	}
+
+	// add the trees to the database
+	idGeneration, err := res.LastInsertId()
+
+	for i := 0; i < len(data.Trees); i++ {
+		res, err := tx.Exec("INSERT INTO trees (idGeneration, tree) VALUES (?, ?)", idGeneration, data.Trees[i])
+		if err != nil {
+			log.Fatal(err)
+			tx.Rollback() // Important
+		}
+
+		idTree, err := res.LastInsertId()
+		if err != nil {
+			log.Fatal(err)
+			tx.Rollback() // Important
+			return
+		}
+
+		for j := 0; j < len(data.Metric_config); j++ {
+			if data.Metric_config[j] == '0' {
+				continue
+			}
+
+			_, err := tx.Exec("INSERT INTO tree_data (treeId, value, attributeId) VALUES (?, ?, ?)", idTree, data.Attribute_data[i][j], j)
+			if err != nil {
+				log.Fatal(err)
+				tx.Rollback() // Important
+			}
+		}
+	}
+
+	tx.Commit()
+}
+
 func main() {
 	// Define the DSN (Data Source Name).
 	dsn := "root:password@tcp(127.0.0.1:3307)/main"
 
 	// Establish the connection.
-	db, err := sql.Open("mysql", dsn)
+	var err error
+	db, err = sql.Open("mysql", dsn)
 
 	if err != nil {
 		log.Fatal(err)
@@ -78,11 +135,6 @@ func main() {
 	}
 
 	fmt.Println("Successfully connected to the database!")
-
-	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello, man!")
-		fmt.Print("request sent!")
-	})
 
 	http.HandleFunc("/evolutionary_data", postHandler)
 
