@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 var db *sql.DB
+var validApiKeys []string
 
 type UploadData struct {
 	Run_id                    int64       `json:"run_id"`
@@ -27,7 +30,24 @@ type FinishRunId struct {
 	Run_id int64 `json:"run_id"`
 }
 
+func checkAPIKey(r *http.Request, validAPIKeys []string) bool {
+	incomingAPIKey := r.Header.Get("X-API-Key")
+	for _, validKey := range validAPIKeys {
+		if incomingAPIKey == validKey {
+			return true
+		}
+	}
+	return false
+}
+
 func postHandler(w http.ResponseWriter, r *http.Request) {
+
+	if !checkAPIKey(r, validApiKeys) {
+		fmt.Println("Unauthorized connection attempt")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		fmt.Println("Only POST method is allowed")
 		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
@@ -134,9 +154,30 @@ func uploadDataToDB(data UploadData) {
 	tx.Commit()
 }
 
+func loadValidAPIKeys(filename string) ([]string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var validAPIKeys []string
+	for scanner.Scan() {
+		validAPIKeys = append(validAPIKeys, scanner.Text())
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return validAPIKeys, nil
+}
+
 func main() {
 	// Define the DSN (Data Source Name).
 	dsn := "root:password@tcp(127.0.0.1:3307)/main"
+	validApiKeys, _ = loadValidAPIKeys("./valid_api_keys.txt")
 
 	// Establish the connection.
 	var err error
