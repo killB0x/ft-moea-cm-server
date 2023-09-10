@@ -23,8 +23,8 @@ type UploadData struct {
 	Time                      float64     `json:"time"`
 }
 
-type Test struct {
-	Key string `json:"key"`
+type FinishRunId struct {
+	Run_id int64 `json:"run_id"`
 }
 
 func postHandler(w http.ResponseWriter, r *http.Request) {
@@ -41,23 +41,45 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var recievedData UploadData
-	fmt.Println("String:", string(body))
-	err = json.Unmarshal(body, &recievedData)
+	fmt.Println("Path", r.URL.Path)
+	switch r.URL.Path {
+	case "/evolutionary_data":
+		var recievedData UploadData
+		err = json.Unmarshal(body, &recievedData)
 
-	if err != nil {
-		fmt.Println("Error parsing json object", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return
+		if err != nil {
+			fmt.Println("Error parsing json object", err)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		uploadDataToDB(recievedData)
+	case "/end_run":
+		var idData FinishRunId
+		err = json.Unmarshal(body, &idData)
+		fmt.Println("uppdateId", idData)
+		if err != nil {
+			fmt.Println("Error parsing json object", err)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		finishRun(idData)
 	}
-
-	fmt.Println("Dataset:", recievedData.Dataset)
-	uploadDataToDB(recievedData)
 
 	// You can add more logic here to react to the POST request.
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully received POST request"))
+}
+
+func finishRun(data FinishRunId) {
+	result, err := db.Exec("UPDATE run SET completed = ? WHERE idRun = ?", 1, data.Run_id)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	fmt.Println("Rows affected", rowsAffected, data.Run_id)
 }
 
 func uploadDataToDB(data UploadData) {
@@ -137,6 +159,7 @@ func main() {
 	fmt.Println("Successfully connected to the database!")
 
 	http.HandleFunc("/evolutionary_data", postHandler)
+	http.HandleFunc("/end_run", postHandler)
 
 	fmt.Printf("Starting server at port 8080\n")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
