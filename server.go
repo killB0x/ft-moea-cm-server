@@ -9,12 +9,17 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
+type TransactionFunc func(interface{}) interface{}
+
 var db *sql.DB
 var validApiKeys []string
+var transactionQueue []TransactionFunc
 
 type UploadData struct {
 	Run_id                    int64       `json:"run_id"`
@@ -28,6 +33,24 @@ type UploadData struct {
 
 type FinishRunId struct {
 	Run_id int64 `json:"run_id"`
+}
+
+var transactionChannel = make(chan bool, 1)
+var transactionQueueMutex = &sync.Mutex{}
+
+func consumeData() {
+	for {
+		<-transactionChannel
+		fmt.Println("We are consuming data")
+		transactionQueueMutex.Lock()
+		for len(transactionQueue) != 0 {
+			var transaction TransactionFunc
+			transaction, transactionQueue = transactionQueue[0], transactionQueue[1:]
+			transaction(nil)
+			fmt.Println("Transaction executed")
+		}
+		transactionQueueMutex.Unlock()
+	}
 }
 
 func checkAPIKey(r *http.Request, validAPIKeys []string) bool {
@@ -72,7 +95,12 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		uploadDataToDB(recievedData)
+		transactionQueue = append(transactionQueue, func(data interface{}) interface{} {
+			uploadDataToDB(recievedData)
+			return nil
+		})
+		transactionChannel <- true
+
 	case "/end_run":
 		var idData FinishRunId
 		err = json.Unmarshal(body, &idData)
@@ -82,8 +110,11 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-
-		finishRun(idData)
+		transactionQueue = append(transactionQueue, func(data interface{}) interface{} {
+			finishRun(data.(FinishRunId))
+			return nil
+		})
+		transactionChannel <- true
 	}
 
 	// You can add more logic here to react to the POST request.
@@ -138,16 +169,31 @@ func uploadDataToDB(data UploadData) {
 			return
 		}
 
+		var query strings.Builder
+		var values []interface{}
+
+		query.WriteString("INSERT INTO tree_data (treeId, value, attributeId) VALUES ")
+
 		for j := 0; j < len(data.Metric_config); j++ {
 			if data.Metric_config[j] == '0' {
 				continue
 			}
 
-			_, err := tx.Exec("INSERT INTO tree_data (treeId, value, attributeId) VALUES (?, ?, ?)", idTree, data.Attribute_data[i][j], j)
-			if err != nil {
-				log.Fatal(err)
-				tx.Rollback() // Important
-			}
+			// Append query placeholder
+			query.WriteString("(?, ?, ?),")
+
+			// Append actual values
+			values = append(values, idTree, data.Attribute_data[i][j], j)
+		}
+
+		// Remove trailing comma
+		queryString := strings.TrimSuffix(query.String(), ",")
+
+		// Perform the query
+		_, err = tx.Exec(queryString, values...)
+		if err != nil {
+			log.Fatal(err)
+			tx.Rollback() // Important
 		}
 	}
 
@@ -178,7 +224,7 @@ func main() {
 	// Define the DSN (Data Source Name).
 	dsn := "root:password@tcp(127.0.0.1:3307)/main"
 	validApiKeys, _ = loadValidAPIKeys("./valid_api_keys.txt")
-
+	go consumeData()
 	// Establish the connection.
 	var err error
 	db, err = sql.Open("mysql", dsn)
